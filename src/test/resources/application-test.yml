@@ -1,0 +1,29 @@
+# Tuned for fast, deterministic tests. The production values in application.yml are deliberately
+# different — a 10-call sliding window and a 10s open state make for a terrible test suite.
+account-service:
+  connect-timeout: 500ms
+  read-timeout: 1s
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      accountService:
+        sliding-window-size: 6
+        minimum-number-of-calls: 6
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 2s
+        permitted-number-of-calls-in-half-open-state: 2
+        automatic-transition-from-open-to-half-open-enabled: false
+  retry:
+    instances:
+      accountService:
+        max-attempts: 3
+        wait-duration: 10ms
+        enable-exponential-backoff: false
+        enable-randomized-wait: false
+
+logging:
+  level:
+    org.testcontainers: WARN
+    com.github.dockerjava: WARN
+    org.flywaydb: WARN
