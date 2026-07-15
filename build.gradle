@@ -1,0 +1,24 @@
+description = 'Event Gateway API — public-facing ingestion, idempotency, event store'
+
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+    implementation 'org.springframework.boot:spring-boot-starter-aop'
+
+    // Resiliency: circuit breaker + retry with exponential backoff & jitter
+    implementation 'io.github.resilience4j:resilience4j-spring-boot3:2.2.0'
+
+    // Schema is owned by Flyway, not by Hibernate (ddl-auto: none)
+    implementation 'org.flywaydb:flyway-core'
+    implementation 'org.flywaydb:flyway-database-postgresql'
+    runtimeOnly 'org.postgresql:postgresql'
+
+    testImplementation 'org.springframework.boot:spring-boot-testcontainers'
+    testImplementation 'org.testcontainers:junit-jupiter'
+    testImplementation 'org.testcontainers:postgresql'
+    // WireMock stands in for the (not-yet-built) Account Service
+    testImplementation 'org.wiremock:wiremock-standalone:3.9.2'
+}
+
+bootJar {
+    archiveFileName = 'event-gateway.jar'
+}
