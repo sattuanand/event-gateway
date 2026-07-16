@@ -1,0 +1,79 @@
+# Single-command stack: builds and runs event-gateway + account-service together, each with
+# its own Postgres. Unlike docker-compose.yml (event-gateway alone, joining an external network
+# that account-service's own stack must also be started separately to create), this file needs
+# nothing pre-created — one project, one shared default network, one command.
+#
+# Requires a checkout of account-service as a sibling directory (../account-service) — see
+# README's "System requirements".
+#
+#   docker compose -f docker-compose.full.yml up --build
+#
+# Ports: gateway :8080, account-service :8081, gateway's postgres :5432, account-service's
+# postgres :5433.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: eventledger
+      POSTGRES_USER: eventledger
+      POSTGRES_PASSWORD: eventledger
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U eventledger -d eventledger"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  account-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: accountledger
+      POSTGRES_USER: accountledger
+      POSTGRES_PASSWORD: accountledger
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U accountledger -d accountledger"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  account-service:
+    build:
+      context: ../account-service
+    ports:
+      - "8081:8081"
+    environment:
+      DB_URL: jdbc:postgresql://account-db:5432/accountledger
+      DB_USERNAME: accountledger
+      DB_PASSWORD: accountledger
+    depends_on:
+      account-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8081/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  gateway:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/eventledger
+      DB_USERNAME: eventledger
+      DB_PASSWORD: eventledger
+      ACCOUNT_SERVICE_URL: http://account-service:8081
+    depends_on:
+      postgres:
+        condition: service_healthy
+      account-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5

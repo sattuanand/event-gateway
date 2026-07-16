@@ -1,6 +1,7 @@
 package com.eventledger.gateway.api;
 
 import com.eventledger.gateway.api.dto.ErrorResponse;
+import com.eventledger.gateway.client.AccountNotFoundException;
 import com.eventledger.gateway.client.AccountServiceRejectedException;
 import com.eventledger.gateway.client.AccountServiceUnavailableException;
 import com.eventledger.gateway.service.EventNotFoundException;
@@ -103,17 +104,19 @@ public class GlobalExceptionHandler {
     }
 
     /**
-     * Requirement 6: the Account Service being unreachable is a 503, not a 500 and not a hang.
-     * The event itself is already durably stored; this response is a "retry later" signal, and the
-     * eventId-based idempotency is what makes acting on that signal safe.
+     * Requirement 6: the Account Service being unreachable is a 503, not a 500 and not a hang. The
+     * exact wording differs by call site (write vs. balance read) — each throw site sets its own
+     * accurate message rather than this handler guessing at one generic explanation.
      */
     @ExceptionHandler(AccountServiceUnavailableException.class)
     public ResponseEntity<ErrorResponse> handleUnavailable(AccountServiceUnavailableException e) {
         log.warn("Returning 503 — account-service unavailable: {}", e.getMessage());
-        return build(HttpStatus.SERVICE_UNAVAILABLE,
-                "Account Service is unavailable. The event has been stored and can be safely resubmitted "
-                        + "with the same eventId once the service recovers.",
-                null);
+        return build(HttpStatus.SERVICE_UNAVAILABLE, e.getMessage(), null);
+    }
+
+    @ExceptionHandler(AccountNotFoundException.class)
+    public ResponseEntity<ErrorResponse> handleAccountNotFound(AccountNotFoundException e) {
+        return build(HttpStatus.NOT_FOUND, e.getMessage(), null);
     }
 
     /** Account Service answered 4xx — it is up, and it refused us. Our bug, not an outage. */

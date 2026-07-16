@@ -62,6 +62,42 @@ public class AccountServiceClient {
         }
         log.warn("account-service unavailable for eventId={} accountId={} cause={}",
                 request.eventId(), accountId, t.toString());
-        throw new AccountServiceUnavailableException("Account Service is unavailable", t);
+        throw new AccountServiceUnavailableException(
+                "Account Service is unavailable. The event has been stored and can be safely "
+                        + "resubmitted with the same eventId once the service recovers.", t);
+    }
+
+    /** Same resiliency posture as {@link #applyTransaction}: same breaker, same retry, same rules. */
+    @Retry(name = "accountService", fallbackMethod = "getBalanceFallback")
+    @CircuitBreaker(name = "accountService")
+    public AccountBalance getBalance(String accountId) {
+        log.debug("Calling account-service for balance accountId={}", accountId);
+        return restClient.get()
+                .uri("/accounts/{accountId}", accountId)
+                .retrieve()
+                .body(AccountBalance.class);
+    }
+
+    /**
+     * A 404 here means account-service is healthy and correctly told us there's no such account —
+     * that must surface as OUR OWN 404, never as a 503 "Account Service is unavailable" (which would
+     * wrongly suggest retrying later would help) or a 502 (which implies we sent something invalid).
+     */
+    @SuppressWarnings("unused") // invoked reflectively by Resilience4j
+    private AccountBalance getBalanceFallback(String accountId, Throwable t) {
+        if (t instanceof HttpClientErrorException.NotFound) {
+            throw new AccountNotFoundException(accountId);
+        }
+        if (t instanceof HttpClientErrorException clientError) {
+            log.error("account-service rejected balance lookup accountId={} status={} body={}",
+                    accountId, clientError.getStatusCode(), clientError.getResponseBodyAsString());
+            throw new AccountServiceRejectedException(
+                    "Account Service rejected the balance lookup: " + clientError.getStatusCode(),
+                    clientError.getStatusCode().value(), clientError);
+        }
+        log.warn("account-service unavailable for balance lookup accountId={} cause={}", accountId, t.toString());
+        throw new AccountServiceUnavailableException(
+                "Account Service is unreachable. The balance for account '" + accountId
+                        + "' cannot be retrieved right now; try again once the service recovers.", t);
     }
 }

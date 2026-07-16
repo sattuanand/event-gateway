@@ -1,7 +1,7 @@
 {
-  "eventId": "evt-002",
-  "accountId": "acct-977",
-  "type": "DEBIT",
+  "eventId": "evt-101",
+  "accountId": "acct-101",
+  "type": "CREDIT",
   "amount": 150.00,
   "currency": "USD",
   "eventTimestamp": "2026-05-15T08:30:11Z",

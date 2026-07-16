@@ -4,6 +4,9 @@ import com.github.tomakehurst.wiremock.verification.LoggedRequest;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 
@@ -26,6 +29,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * starter on its classpath.
  */
 @DisplayName("Requirement 3: distributed tracing")
+@ExtendWith(OutputCaptureExtension.class)
 class TracePropagationTest extends AbstractIntegrationTest {
 
     @BeforeEach

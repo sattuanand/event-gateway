@@ -10,6 +10,7 @@ import org.springframework.http.ResponseEntity;
 import java.util.Map;
 
 import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
+import static com.github.tomakehurst.wiremock.client.WireMock.get;
 import static com.github.tomakehurst.wiremock.client.WireMock.post;
 import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlPathMatching;
@@ -161,5 +162,59 @@ class ResiliencyTest extends AbstractIntegrationTest {
         // An orchestrator must not restart the Gateway because someone else's service is broken.
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(response.getBody()).containsEntry("status", "UP");
+    }
+
+    @Test
+    @DisplayName("a balance query is a 503, not a 500 and not a hang, when the Account Service is down")
+    void balanceQueryReturns503WhenDownstreamIsFailing() {
+        ACCOUNT_SERVICE.stubFor(get(urlPathMatching("/accounts/.*")).willReturn(aResponse().withStatus(500)));
+
+        ResponseEntity<String> response = restTemplate.getForEntity("/accounts/acct-balance-down", String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        assertThat(response.getBody()).contains("Account Service is unreachable");
+    }
+
+    @Test
+    @DisplayName("a balance query succeeds when the Account Service is healthy")
+    void balanceQuerySucceedsWhenDownstreamIsHealthy() {
+        ACCOUNT_SERVICE.stubFor(get(urlPathMatching("/accounts/.*")).willReturn(aResponse().withStatus(200)
+                .withHeader("Content-Type", "application/json")
+                .withBody("{\"accountId\":\"acct-balance-ok\",\"balance\":42.50,\"currency\":\"USD\","
+                        + "\"updatedAt\":\"2026-05-15T14:00:00Z\"}")));
+
+        ResponseEntity<Map> response = restTemplate.getForEntity("/accounts/acct-balance-ok", Map.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(response.getBody()).containsEntry("accountId", "acct-balance-ok").containsEntry("balance", 42.5);
+    }
+
+    @Test
+    @DisplayName("a balance query for an account that genuinely doesn't exist is a 404, not a 503")
+    void balanceQueryReturns404WhenAccountDoesNotExist() {
+        ACCOUNT_SERVICE.stubFor(get(urlPathMatching("/accounts/.*")).willReturn(aResponse().withStatus(404)
+                .withHeader("Content-Type", "application/json")
+                .withBody("{\"message\":\"No account found with id 'acct-missing'\"}")));
+
+        ResponseEntity<String> response = restTemplate.getForEntity("/accounts/acct-missing", String.class);
+
+        // Healthy downstream correctly saying "no such account" must not be laundered into a 503 —
+        // that would wrongly tell the caller "try again later" for something retrying can't fix.
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(response.getBody()).contains("acct-missing");
+    }
+
+    @Test
+    @DisplayName("a slow balance query is timed out rather than hanging")
+    void slowBalanceQueryIsTimedOut() {
+        ACCOUNT_SERVICE.stubFor(get(urlPathMatching("/accounts/.*"))
+                .willReturn(aResponse().withStatus(200).withFixedDelay(3000)));
+
+        long start = System.currentTimeMillis();
+        ResponseEntity<String> response = restTemplate.getForEntity("/accounts/acct-slow", String.class);
+        long elapsed = System.currentTimeMillis() - start;
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        assertThat(elapsed).as("must not wait for the full downstream delay").isLessThan(9000);
     }
 }
