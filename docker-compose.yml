@@ -21,6 +21,14 @@ services:
       DB_URL: jdbc:postgresql://postgres:5432/eventledger
       DB_USERNAME: eventledger
       DB_PASSWORD: eventledger
+      ACCOUNT_SERVICE_URL: http://account-service:8081
     depends_on:
       postgres:
         condition: service_healthy
+    networks:
+      - default
+      - event-ledger-net
+
+networks:
+  event-ledger-net:
+    external: true
