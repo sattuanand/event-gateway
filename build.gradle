@@ -35,6 +35,9 @@ dependencies {
     implementation 'org.flywaydb:flyway-core'
     implementation 'org.flywaydb:flyway-database-postgresql'
     runtimeOnly 'org.postgresql:postgresql'
+    // Embedded, in-memory DB for the 'standalone' profile — runs with zero external processes.
+    // Flyway supports H2 natively (no separate flyway-database-h2 artifact needed).
+    runtimeOnly 'com.h2database:h2'
 
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
     testImplementation 'org.springframework.boot:spring-boot-testcontainers'

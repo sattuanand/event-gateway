@@ -1,0 +1,12 @@
+# Run with: java -jar event-gateway.jar --spring.profiles.active=standalone
+#
+# No Docker, no external Postgres — an embedded, in-memory H2 database owned entirely by this
+# process. DB_CLOSE_DELAY=-1 keeps the in-memory data alive for the life of the JVM (H2's default
+# is to drop it the moment the connection pool's last connection closes). Data does not survive a
+# restart and is never shared with any other process, including account-service's own database.
+spring:
+  datasource:
+    url: jdbc:h2:mem:eventledger;DB_CLOSE_DELAY=-1;MODE=PostgreSQL
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""

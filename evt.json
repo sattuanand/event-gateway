@@ -1,8 +1,8 @@
 {
-  "eventId": "evt-001",
+  "eventId": "evt-002",
   "accountId": "acct-977",
   "type": "DEBIT",
-  "amount": 100.00,
+  "amount": 150.00,
   "currency": "USD",
   "eventTimestamp": "2026-05-15T08:30:11Z",
   "metadata": {"source": "mainframe-batch"}

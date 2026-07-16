@@ -87,6 +87,31 @@ curl.exe -s localhost:8080/events/evt-001
 curl.exe -s "localhost:8080/events?account=acct-977"
 ```
 
+## Running standalone, without Docker
+
+Each service can also run as a bare jar with its own embedded, in-memory H2 database instead
+of Postgres — two independent processes, no Docker, no shared state, nothing to install beyond
+a JDK. Data does not survive a restart.
+
+```bash
+# account-service
+cd account-service
+./gradlew bootJar
+java -jar build/libs/account-service.jar --spring.profiles.active=standalone
+
+# event-gateway (separate terminal)
+cd event-gateway
+./gradlew bootJar
+java -jar build/libs/event-gateway.jar --spring.profiles.active=standalone
+```
+
+This uses the `standalone` Spring profile (`application-standalone.yml` in each repo), which
+points `spring.datasource.url` at `jdbc:h2:mem:...` instead of Postgres. Everything else —
+ports, `ACCOUNT_SERVICE_URL`, Flyway migrations — is unchanged; the same SQL migrations that
+run against Postgres in Docker run against H2 here. Verified end-to-end: submit an event via
+`POST :8080/events`, and `GET :8081/accounts/{accountId}` on the standalone account-service
+reflects the correct balance, with each process owning a completely separate database.
+
 ## Configuration
 
 Set via environment variables on the `gateway` service in `docker-compose.yml`:
