@@ -7,6 +7,7 @@ import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.test.context.ActiveProfiles;
@@ -34,6 +35,9 @@ import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.options
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("test")
+// Spring Boot disables metrics export and tracing by default under @SpringBootTest for speed.
+// These tests assert on that exact behavior (Requirement 3 and 4), so opt back in.
+@AutoConfigureObservability
 public abstract class AbstractIntegrationTest {
 
     protected static final PostgreSQLContainer<?> POSTGRES =

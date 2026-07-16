@@ -54,6 +54,9 @@ management:
     sampling:
       # Sample everything. This is a take-home, not a system under production load.
       probability: 1.0
+    propagation:
+      # W3C traceparent, not Brave's bespoke B3 header — see RestClientConfig for why.
+      type: W3C
 
 resilience4j:
   circuitbreaker:
