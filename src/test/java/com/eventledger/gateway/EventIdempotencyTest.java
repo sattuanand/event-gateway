@@ -107,6 +107,25 @@ class EventIdempotencyTest extends AbstractIntegrationTest {
     }
 
     @Test
+    @DisplayName("eventId is the sole dedup key: reusing it under a different accountId returns the "
+            + "ORIGINAL account's event rather than silently applying to the new account")
+    void duplicateEventIdUnderDifferentAccountReturnsOriginalAccount() {
+        restTemplate.postForEntity("/events",
+                TestEvents.valid().with("accountId", "acct-original").build(), Map.class);
+
+        ResponseEntity<Map> response = restTemplate.postForEntity("/events",
+                TestEvents.valid().with("accountId", "acct-different").build(), Map.class);
+
+        // The caller can detect the mismatch by comparing the returned accountId to what they sent,
+        // but the API does not itself reject or flag it — eventId uniqueness is global, not
+        // per-account. Documented here as current behaviour rather than assumed.
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(response.getBody()).containsEntry("accountId", "acct-original");
+        assertThat(eventRepository.count()).isOne();
+        ACCOUNT_SERVICE.verify(1, postRequestedFor(urlPathMatching("/accounts/.*/transactions")));
+    }
+
+    @Test
     @DisplayName("an event that failed downstream is re-driven on resubmit, not silently swallowed")
     void failedEventIsRetriedOnResubmit() {
         ACCOUNT_SERVICE.resetAll();

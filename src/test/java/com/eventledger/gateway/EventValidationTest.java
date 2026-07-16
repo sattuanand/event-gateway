@@ -1,35 +1,141 @@
 package com.eventledger.gateway;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 
 import java.util.Map;
 
+import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
+import static com.github.tomakehurst.wiremock.client.WireMock.post;
+import static com.github.tomakehurst.wiremock.client.WireMock.urlPathMatching;
 import static org.assertj.core.api.Assertions.assertThat;
 
 @DisplayName("Requirement 1: validation")
 class EventValidationTest extends AbstractIntegrationTest {
 
-    private ResponseEntity<String> post(Map<String, Object> body) {
+    // Only the "accepts ..." boundary tests below actually reach the downstream call — every
+    // rejection test fails validation first and never touches this stub.
+    @BeforeEach
+    void stubHealthyAccountService() {
+        ACCOUNT_SERVICE.stubFor(post(urlPathMatching("/accounts/.*/transactions"))
+                .willReturn(aResponse().withStatus(201)));
+    }
+
+    private ResponseEntity<String> postEvent(Map<String, Object> body) {
         return restTemplate.postForEntity("/events", body, String.class);
     }
 
     @Test
     @DisplayName("rejects a missing required field with 400 and names the field")
     void rejectsMissingField() {
-        ResponseEntity<String> response = post(TestEvents.valid().without("accountId").build());
+        ResponseEntity<String> response = postEvent(TestEvents.valid().without("accountId").build());
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
         assertThat(response.getBody()).contains("accountId");
         assertThat(eventRepository.count()).isZero();
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"eventId", "accountId", "type", "amount", "currency", "eventTimestamp"})
+    @DisplayName("rejects every required field when it is missing, individually")
+    void rejectsEachMissingRequiredField(String field) {
+        ResponseEntity<String> response = postEvent(TestEvents.valid().without(field).build());
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody()).contains(field);
+        assertThat(eventRepository.count()).isZero();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"eventId", "accountId", "currency"})
+    @DisplayName("rejects a blank string as distinct from a missing field")
+    void rejectsBlankStringField(String field) {
+        ResponseEntity<String> response = postEvent(TestEvents.valid().with(field, "").build());
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody()).contains(field);
+        assertThat(eventRepository.count()).isZero();
+    }
+
+    @Test
+    @DisplayName("rejects an eventId over the 128 character limit")
+    void rejectsOverlongEventId() {
+        String tooLong = "e".repeat(129);
+        ResponseEntity<String> response = postEvent(TestEvents.valid().with("eventId", tooLong).build());
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody()).contains("eventId");
+        assertThat(eventRepository.count()).isZero();
+    }
+
+    @Test
+    @DisplayName("accepts an eventId at exactly the 128 character limit")
+    void acceptsEventIdAtTheLimit() {
+        String atLimit = "e".repeat(128);
+        ResponseEntity<String> response = postEvent(TestEvents.valid().with("eventId", atLimit).build());
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+    }
+
+    @Test
+    @DisplayName("rejects a currency code that isn't exactly 3 letters")
+    void rejectsMalformedCurrencyCode() {
+        ResponseEntity<String> response = postEvent(TestEvents.valid().with("currency", "US").build());
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody()).contains("currency");
+    }
+
+    @Test
+    @DisplayName("accepts a lower-case 3-letter currency code")
+    void acceptsLowerCaseCurrencyCode() {
+        ResponseEntity<String> response = postEvent(TestEvents.valid().with("currency", "usd").build());
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+    }
+
+    @Test
+    @DisplayName("amount given as a non-numeric string is a malformed-body 400, not a 500")
+    void rejectsNonNumericAmount() {
+        ResponseEntity<String> response = postEvent(TestEvents.valid().with("amount", "not-a-number").build());
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+    }
+
+    @Test
+    @DisplayName("metadata is optional — a valid event without it is still accepted")
+    void metadataIsOptional() {
+        ResponseEntity<String> response = postEvent(TestEvents.valid().without("metadata").build());
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+    }
+
+    @Test
+    @DisplayName("a body that isn't JSON at all is rejected as malformed, not a 500")
+    void rejectsNonJsonBody() {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        HttpEntity<String> request = new HttpEntity<>("{this is not json", headers);
+
+        ResponseEntity<String> response = restTemplate.postForEntity("/events", request, String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody()).contains("malformed");
+        assertThat(eventRepository.count()).isZero();
+    }
+
     @Test
     @DisplayName("rejects a zero amount")
     void rejectsZeroAmount() {
-        ResponseEntity<String> response = post(TestEvents.valid().with("amount", 0).build());
+        ResponseEntity<String> response = postEvent(TestEvents.valid().with("amount", 0).build());
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
         assertThat(response.getBody()).contains("amount must be greater than 0");
@@ -38,7 +144,7 @@ class EventValidationTest extends AbstractIntegrationTest {
     @Test
     @DisplayName("rejects a negative amount")
     void rejectsNegativeAmount() {
-        ResponseEntity<String> response = post(TestEvents.valid().with("amount", -10.5).build());
+        ResponseEntity<String> response = postEvent(TestEvents.valid().with("amount", -10.5).build());
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
         assertThat(response.getBody()).contains("amount must be greater than 0");
@@ -47,7 +153,7 @@ class EventValidationTest extends AbstractIntegrationTest {
     @Test
     @DisplayName("rejects an unknown type and tells the caller what is allowed")
     void rejectsUnknownType() {
-        ResponseEntity<String> response = post(TestEvents.valid().with("type", "TRANSFER").build());
+        ResponseEntity<String> response = postEvent(TestEvents.valid().with("type", "TRANSFER").build());
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
         assertThat(response.getBody()).contains("TRANSFER").contains("CREDIT").contains("DEBIT");
@@ -56,7 +162,7 @@ class EventValidationTest extends AbstractIntegrationTest {
     @Test
     @DisplayName("rejects a malformed eventTimestamp")
     void rejectsBadTimestamp() {
-        ResponseEntity<String> response = post(TestEvents.valid().with("eventTimestamp", "last Tuesday").build());
+        ResponseEntity<String> response = postEvent(TestEvents.valid().with("eventTimestamp", "last Tuesday").build());
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
     }
@@ -64,7 +170,7 @@ class EventValidationTest extends AbstractIntegrationTest {
     @Test
     @DisplayName("a rejected event never reaches the Account Service")
     void invalidEventsAreNotForwarded() {
-        post(TestEvents.valid().with("amount", -1).build());
+        postEvent(TestEvents.valid().with("amount", -1).build());
 
         assertThat(ACCOUNT_SERVICE.getAllServeEvents()).isEmpty();
     }
