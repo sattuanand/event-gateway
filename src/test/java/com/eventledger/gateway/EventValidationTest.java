@@ -160,6 +160,60 @@ class EventValidationTest extends AbstractIntegrationTest {
     }
 
     @Test
+    @DisplayName("rejects a lower-case type — enum matching is exact, not case-insensitive")
+    void rejectsLowerCaseType() {
+        ResponseEntity<String> response = postEvent(TestEvents.valid().with("type", "credit").build());
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody()).contains("credit").contains("CREDIT").contains("DEBIT");
+    }
+
+    @Test
+    @DisplayName("rejects an explicit JSON null for type the same as a missing type")
+    void rejectsExplicitNullType() {
+        ResponseEntity<String> response = postEvent(TestEvents.valid().with("type", null).build());
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody()).contains("type");
+    }
+
+    @Test
+    @DisplayName("a validation failure returns the full documented error shape, not just a status code")
+    void validationFailureHasWellFormedErrorBody() {
+        ResponseEntity<Map> response = restTemplate.postForEntity(
+                "/events", TestEvents.valid().with("amount", -5).build(), Map.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody())
+                .containsEntry("status", 400)
+                .containsEntry("error", "Bad Request")
+                .containsKeys("timestamp", "message", "details", "traceId");
+        assertThat((java.util.List<?>) response.getBody().get("details")).isNotEmpty();
+    }
+
+    @Test
+    @DisplayName("an unsupported Content-Type is a 415, not a 500")
+    void unsupportedContentTypeIsA415() {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.TEXT_PLAIN);
+        HttpEntity<String> request = new HttpEntity<>("hello", headers);
+
+        ResponseEntity<String> response = restTemplate.postForEntity("/events", request, String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNSUPPORTED_MEDIA_TYPE);
+        assertThat(eventRepository.count()).isZero();
+    }
+
+    @Test
+    @DisplayName("an unsupported HTTP method on a valid path is a 405, not a 500")
+    void unsupportedHttpMethodIsA405() {
+        ResponseEntity<String> response = restTemplate.exchange(
+                "/events/some-id", org.springframework.http.HttpMethod.DELETE, null, String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.METHOD_NOT_ALLOWED);
+    }
+
+    @Test
     @DisplayName("rejects a malformed eventTimestamp")
     void rejectsBadTimestamp() {
         ResponseEntity<String> response = postEvent(TestEvents.valid().with("eventTimestamp", "last Tuesday").build());
