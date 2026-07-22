@@ -627,24 +627,24 @@ sequenceDiagram
     participant AS as account-service
 
     Note over AS: Account Service is DOWN
-    rect rgb(60,20,20)
+    rect rgb(255, 224, 224)
     C->>GW: POST /events {eventId: evt-x}
     GW->>GWDB: INSERT status=PENDING
     GW->>AS: (retry+breaker exhausted)
     GW->>GWDB: UPDATE status=FAILED
     GW-->>C: 503 "stored, safe to resubmit"
     end
-    rect rgb(20,40,60)
+    rect rgb(224, 236, 255)
     C->>GW: GET /events/evt-x
     GW->>GWDB: SELECT (no call to AS)
     GW-->>C: 200 {status: FAILED}
     end
-    rect rgb(20,40,60)
+    rect rgb(224, 236, 255)
     C->>GW: GET /events?account=acct-1
     GW->>GWDB: SELECT ... ORDER BY event_timestamp
     GW-->>C: 200 [...]
     end
-    rect rgb(60,20,20)
+    rect rgb(255, 224, 224)
     C->>GW: GET /accounts/acct-1
     GW->>AS: GET /accounts/acct-1 (fails)
     GW-->>C: 503 "Account Service is unreachable. Balance cannot be retrieved right now."

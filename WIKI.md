@@ -220,7 +220,7 @@ sequenceDiagram
     participant GWDB as eventledger DB
     participant AS as account-service
 
-    rect rgb(60, 20, 20)
+    rect rgb(255, 224, 224)
     Note over C,AS: Request 1 — Account Service is down
     C->>GW: POST /events {eventId: evt-X, ...}
     GW->>GWDB: INSERT events (status=PENDING)
@@ -231,7 +231,7 @@ sequenceDiagram
     GW-->>C: 503 Service Unavailable<br/>"stored, safe to resubmit with the same eventId"
     end
 
-    rect rgb(20, 60, 20)
+    rect rgb(224, 255, 224)
     Note over C,AS: Request 2 — Account Service has recovered, client resubmits
     C->>GW: POST /events {eventId: evt-X, ...} (identical eventId)
     GW->>GWDB: INSERT fails (PK conflict) → read existing row, status=FAILED
