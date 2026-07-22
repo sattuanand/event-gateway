@@ -583,10 +583,10 @@ sequenceDiagram
     participant GW as event-gateway
     participant GWDB as eventledger DB
     participant PUB as Outbox Publisher
-    participant K1 as Kafka: ledger-events
+    participant K1 as "Kafka: ledger-events"
     participant AS as account-service
     participant ASDB as accountledger DB
-    participant K2 as Kafka: ledger-results
+    participant K2 as "Kafka: ledger-results"
     participant SUB as Result Consumer
 
     C->>GW: POST /events {eventId, accountId, ...}

@@ -61,8 +61,8 @@ over synchronous REST.
 ```mermaid
 sequenceDiagram
     participant C as Client
-    participant GW as event-gateway :8080
-    participant AS as account-service :8081
+    participant GW as "event-gateway :8080"
+    participant AS as "account-service :8081"
 
     C->>GW: POST /events
     GW->>AS: POST /accounts/{id}/transactions
