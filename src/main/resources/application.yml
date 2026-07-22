@@ -42,6 +42,24 @@ account-service:
   connect-timeout: 1s
   read-timeout: 2s
 
+event-gateway:
+  outbox-sweeper:
+    # Redrives events stuck in FAILED (or orphaned in PENDING after a crash) without waiting for a
+    # client resubmit. See OutboxSweeper's class Javadoc. Set to false to disable entirely — the
+    # bean isn't created at all in that case, so no schedule ever registers.
+    enabled: ${OUTBOX_SWEEPER_ENABLED:true}
+    # How often the sweeper runs. Configurable per environment with no code change.
+    interval-ms: ${OUTBOX_SWEEPER_INTERVAL_MS:300000}   # 5 minutes
+    # A PENDING row untouched this long is assumed orphaned (the process crashed mid-call) and is
+    # reaped to FAILED so it becomes eligible for redrive.
+    stale-after: ${OUTBOX_SWEEPER_STALE_AFTER:PT2M}
+    # Cap on FAILED rows redriven per sweep, so a large backlog can't fire a burst that retrips the
+    # circuit breaker it's trying to work around.
+    batch-size: ${OUTBOX_SWEEPER_BATCH_SIZE:50}
+    # A row that has failed this many redrive attempts is left alone (still resubmittable by a
+    # client directly) rather than retried forever — a "poison pill" guard.
+    max-redrive-attempts: ${OUTBOX_SWEEPER_MAX_ATTEMPTS:10}
+
 management:
   endpoints:
     web:

@@ -197,6 +197,28 @@ Set via environment variables on the `gateway` service in `docker-compose.yml`:
 | `DB_USERNAME`         | `eventledger`                    | —                            |
 | `DB_PASSWORD`         | `eventledger`                    | —                            |
 | `ACCOUNT_SERVICE_URL` | `http://account-service:8081`    | Base URL for the downstream call — must resolve on `event-ledger-net`, not `localhost` |
+| `OUTBOX_SWEEPER_ENABLED` | `true` | Set `false` to disable the outbox sweeper entirely (see below) — the bean isn't created at all in that case |
+| `OUTBOX_SWEEPER_INTERVAL_MS` | `300000` (5 min) | How often the sweeper runs |
+| `OUTBOX_SWEEPER_STALE_AFTER` | `PT2M` | A `PENDING` row untouched this long is assumed orphaned by a crash and reaped to `FAILED` |
+| `OUTBOX_SWEEPER_BATCH_SIZE` | `50` | Max `FAILED` events redriven per sweep |
+| `OUTBOX_SWEEPER_MAX_ATTEMPTS` | `10` | A row that has failed this many redrive attempts is left alone (still resubmittable manually) rather than retried forever |
+
+## Automatic recovery: the outbox sweeper
+
+An event that ends up `FAILED` — because account-service was down when it was submitted — used to
+require the *client* to resubmit the same `eventId` for the balance change to ever actually happen.
+`OutboxSweeper` (`service/OutboxSweeper.java`) closes that gap: a `@Scheduled` job that periodically
+redrives `FAILED` events (and reaps any `PENDING` row orphaned by a crash mid-call) through the
+exact same idempotent, Retry+CircuitBreaker-wrapped call a client resubmit uses — no new
+infrastructure, no new failure mode, same CAS guard against double-applying.
+
+It's fully configurable via the `OUTBOX_SWEEPER_*` variables above, and can be disabled outright
+with `OUTBOX_SWEEPER_ENABLED=false`. A chronically-failing event stops being auto-retried once it
+exceeds `OUTBOX_SWEEPER_MAX_ATTEMPTS` redrive attempts (tracked in `events.redrive_count`) — it's
+still resubmittable directly by a client at any time, the sweeper just stops looping on it forever.
+See [WIKI.md §6](WIKI.md#6-async-recovery-outbox-sweeper-built-and-a-possible-kafka-future-not-built)
+for the full design, including why the stale-`PENDING` reap is a separate step from the `FAILED`
+redrive.
 
 ## Resiliency pattern
 

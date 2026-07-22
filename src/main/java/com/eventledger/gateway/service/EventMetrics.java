@@ -22,6 +22,8 @@ public class EventMetrics {
     private static final String REJECTED = "events.rejected";
     private static final String DOWNSTREAM_FAILED = "events.downstream.failed";
     private static final String APPLY_LATENCY = "events.apply.latency";
+    private static final String SWEEP_REDRIVEN = "events.sweeper.redriven";
+    private static final String SWEEP_STILL_FAILED = "events.sweeper.still_failed";
 
     private final MeterRegistry registry;
 
@@ -55,5 +57,11 @@ public class EventMetrics {
 
     public void stopApplyTimer(Timer.Sample sample, String outcome) {
         sample.stop(registry.timer(APPLY_LATENCY, "outcome", outcome));
+    }
+
+    /** One outbox sweep's outcome — how many events it successfully redrove vs. how many are still stuck. */
+    public void sweepCompleted(int redriven, int stillFailed) {
+        registry.counter(SWEEP_REDRIVEN).increment(redriven);
+        registry.counter(SWEEP_STILL_FAILED).increment(stillFailed);
     }
 }

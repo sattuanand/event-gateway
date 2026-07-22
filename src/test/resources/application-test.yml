@@ -4,6 +4,14 @@ account-service:
   connect-timeout: 500ms
   read-timeout: 1s
 
+event-gateway:
+  outbox-sweeper:
+    # Off by default so the shared test context never fires the scheduler mid-suite (which would
+    # make WireMock call counts and CircuitBreaker state non-deterministic for every OTHER test).
+    # OutboxSweeperTest opts back in explicitly via its own @TestPropertySource, which gives it a
+    # separate, dedicated Spring context — same pattern FullStackIntegrationTest already uses.
+    enabled: false
+
 resilience4j:
   circuitbreaker:
     instances:

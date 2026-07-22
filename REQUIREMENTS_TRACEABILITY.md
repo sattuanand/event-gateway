@@ -26,6 +26,7 @@ For load-bearing invariants and conventions, see [SKILL.md](SKILL.md).
 5. [Observability](#5-observability)
 6. [Resiliency](#6-resiliency)
 7. [Graceful Degradation](#7-graceful-degradation)
+   - [7A. Beyond-Spec: Outbox Sweeper (Automatic Recovery)](#7a-beyond-spec-outbox-sweeper-automatic-recovery)
 8. [Docker Compose](#8-docker-compose)
 9. [Automated Tests](#9-automated-tests)
 10. [README](#10-readme)
@@ -654,6 +655,93 @@ sequenceDiagram
 
 ---
 
+## 7A. Beyond-Spec: Outbox Sweeper (Automatic Recovery)
+
+**Not required by the spec.** §7 above closes the *synchronous* half of graceful degradation — a
+failed write returns `503`, never a hang. But until this was added, the only way a `FAILED` event
+ever actually got applied was a **client** resubmitting the same `eventId`. `OutboxSweeper` closes
+that remaining gap: a configurable `@Scheduled` job that redrives `FAILED` events — and reaps
+`PENDING` rows orphaned by a crash mid-call — on its own, with no client action required. This
+section exists to show the mechanism with real data, the way every other section above does.
+
+#### Files involved
+
+| File | Role |
+|---|---|
+| [`OutboxSweeper.java`](src/main/java/com/eventledger/gateway/service/OutboxSweeper.java) | The `@Scheduled` job — reap phase, then redrive phase |
+| [`OutboxSweeperProperties.java`](src/main/java/com/eventledger/gateway/service/OutboxSweeperProperties.java) | `enabled`, `staleAfter`, `batchSize`, `maxRedriveAttempts` |
+| [`EventService.java`](src/main/java/com/eventledger/gateway/service/EventService.java) | `redriveIfEligible()` — shared by the sweeper and a client resubmit |
+| [`EventRepository.java`](src/main/java/com/eventledger/gateway/domain/EventRepository.java) | `reapStale`, `findRedrivable`, `compareAndSetStatusForRedrive` |
+| [`V2__add_redrive_count.sql`](src/main/resources/db/migration/V2__add_redrive_count.sql) | The `redrive_count` column backing the poison-pill cap |
+
+#### Worked example, with real data — three events, three outcomes
+
+Setup: `account-service` goes down for a deploy at **14:00:00**, comes back up at **14:04:30**.
+The sweeper runs every 5 minutes (`interval-ms` default), so ticks land at `14:00:00`, `14:05:00`,
+`14:10:00`, ... `stale-after` is 2 minutes, `max-redrive-attempts` is 10.
+
+**Event 1 — `evt-2026-0721-CR`** (`acct-5521`, `CREDIT`, `250.00 USD`), submitted normally at `14:00:00`:
+
+| Time | What happens |
+|---|---|
+| `14:00:00.000` | `POST /events`. Gateway inserts `status=PENDING`, calls `account-service` — it's mid-deploy, the call fails after retry exhaustion. Row flips to `FAILED`, `redrive_count=0`. Client gets `503`. |
+| `14:00:00.9xx` | Client does **not** resubmit (e.g. a fire-and-forget batch job, no retry logic of its own). |
+| `14:05:00.000` | Sweep tick. **Reap phase**: no orphaned `PENDING` rows (this one already settled to `FAILED` cleanly). **Redrive phase**: `findRedrivable(FAILED, maxAttempts=10, batchSize=50)` returns this row (`redrive_count=0 < 10`). `redriveIfEligible()`: CAS `FAILED→PENDING` succeeds, `redrive_count` becomes `1`. `account-service` has been back up for 30 seconds now → call succeeds → CAS `PENDING→APPLIED`. |
+| `14:05:00.3xx` | `evt-2026-0721-CR` is `APPLIED`, `redrive_count=1`. **No client action ever happened** — `GET /events/evt-2026-0721-CR` now shows it settled, five minutes after the original failure, entirely automatically. |
+
+**Event 2 — `evt-2026-0721-DB`** (`acct-5521`, `DEBIT`, `40.00 USD`), Gateway pod is killed mid-call:
+
+| Time | What happens |
+|---|---|
+| `14:02:00.000` | `POST /events`. Gateway inserts `status=PENDING` — then the process is killed (e.g. by an orchestrator) before the downstream call is even attempted. Row is permanently stuck at `PENDING`, `updated_at=14:02:00`. No client response was ever sent, so there's nothing for a client to resubmit against — this row is invisible to the client-resubmit recovery path entirely. |
+| `14:05:00.000` | Sweep tick. **Reap phase**: `reapStale(PENDING, FAILED, staleThreshold=14:03:00, ...)` — `14:02:00 < 14:03:00`, so this row matches and is bulk-flipped to `FAILED`. **Redrive phase**, same tick: the just-reaped row is now `FAILED` with `redrive_count=0`, so it's picked up in the *same* sweep's `findRedrivable` query and redriven immediately. |
+| `14:05:00.4xx` | `evt-2026-0721-DB` is `APPLIED` — recovered from a crash that left **no trace for any client to act on**, purely by the sweeper's reap+redrive combination. |
+
+**Event 3 — `evt-2026-0721-BAD`** (`acct-9901`, `DEBIT`, `999999.00 USD`) — insufficient funds, a genuine poison pill:
+
+| Time / tick | `redrive_count` after | What happens |
+|---|---|---|
+| `14:00:00` (original submit) | `0` | Fails validation-adjacent (insufficient funds is a `409`, not a transient outage — in this illustration assume it's misclassified as `FAILED` rather than immediately surfaced, to show the cap working) |
+| `14:05:00` sweep | `1` | Redrive attempted, fails again, still `FAILED` |
+| `14:10:00`, `14:15:00`, ... `14:45:00` (8 more ticks) | `2` → ... → `9` | Same — each tick attempts, fails, increments |
+| `14:50:00` sweep | `10` | The 10th attempt — still fails |
+| `14:55:00` sweep | **`10` (unchanged)** | `findRedrivable` query is `WHERE redrive_count < 10` — `10 < 10` is `false`, so this row is **excluded** from the candidate list. No 11th attempt is made, no more log noise every 5 minutes. |
+| any time after | manual resubmit only | A human (or the original client) can still `POST /events` with `eventId=evt-2026-0721-BAD` directly — `EventService.handleExisting()` doesn't check the cap, only the sweeper's own query does — so a deliberate manual retry always still works even after the sweeper has given up. |
+
+#### Diagram — Event 1 and Event 2 in the same sweep tick
+
+```mermaid
+sequenceDiagram
+    participant Sched as OutboxSweeper (14:05:00 tick)
+    participant GWDB as eventledger DB
+    participant AS as account-service (back up since 14:04:30)
+
+    Note over GWDB: evt-2026-0721-CR: FAILED, redrive_count=0<br/>evt-2026-0721-DB: PENDING, updated_at=14:02:00 (stale)
+
+    Sched->>GWDB: reapStale(PENDING→FAILED, staleThreshold=14:03:00)
+    GWDB-->>Sched: 1 row reaped (evt-2026-0721-DB)
+
+    Sched->>GWDB: findRedrivable(FAILED, maxAttempts=10, batch=50)
+    GWDB-->>Sched: [evt-2026-0721-CR, evt-2026-0721-DB]
+
+    loop each candidate
+        Sched->>GWDB: compareAndSetStatusForRedrive(FAILED→PENDING, redrive_count++)
+        Sched->>AS: POST /accounts/{id}/transactions
+        AS-->>Sched: 201 Created
+        Sched->>GWDB: UPDATE status=APPLIED
+    end
+
+    Note over GWDB: both events APPLIED by 14:05:00.4xx —<br/>zero client action for either one
+```
+
+**Status**: ✅ Done (beyond spec). Tests: `OutboxSweeperTest` (`redrivesFailedEvent` and
+`reapsStalePendingAndRedrives` are exactly Event 1 and Event 2 above; `stopsRetryingPastMaxAttempts`
+is Event 3), `OutboxSweeperSchedulingTest` (proves the 5-minute tick cadence itself is real and
+configurable). See [WIKI.md §6](WIKI.md#6-async-recovery-outbox-sweeper-built-and-a-possible-kafka-future-not-built)
+for the full design rationale.
+
+---
+
 ## 8. Docker Compose
 
 **Requirement**: `docker-compose.yml` to start both services (or manual instructions).
@@ -706,8 +794,10 @@ Full per-class breakdown lives in [TestCoverage.md](TestCoverage.md) — summari
 | Trace propagation | [`TracePropagationTest`](src/test/java/com/eventledger/gateway/TracePropagationTest.java) (+ account-service's own) | 3 + 4 |
 | Health / metrics | [`HealthAndMetricsTest`](src/test/java/com/eventledger/gateway/HealthAndMetricsTest.java) | 2 |
 | **Full integration (Gateway → real Account Service)** | [`FullStackIntegrationTest`](src/test/java/com/eventledger/gateway/FullStackIntegrationTest.java) | 1 |
+| Beyond-spec: outbox sweeper redrive/reap/poison-pill logic | [`OutboxSweeperTest`](src/test/java/com/eventledger/gateway/OutboxSweeperTest.java) | 6 |
+| Beyond-spec: outbox sweeper interval is configurable, real `@Scheduled` trigger | [`OutboxSweeperSchedulingTest`](src/test/java/com/eventledger/gateway/OutboxSweeperSchedulingTest.java) | 1 |
 
-Account-service adds its own **83** tests underneath (balance math, currency mismatch, account-service-side idempotency, its own trace continuation, domain entities, mappers, metrics) — **143 tests total across both repos, 0 failures**.
+Account-service adds its own **83** tests underneath (balance math, currency mismatch, account-service-side idempotency, its own trace continuation, domain entities, mappers, metrics) — **150 tests total across both repos, 0 failures**.
 
 #### Step by step — how to run
 
@@ -738,7 +828,7 @@ flowchart LR
     gw --> realAS
 ```
 
-**Status**: ✅ Done. `./gradlew test` (or the equivalent in account-service) is the single standard command; 143/143 tests pass on a clean run.
+**Status**: ✅ Done. `./gradlew test` (or the equivalent in account-service) is the single standard command; 150/150 tests pass on a clean run.
 
 ---
 
@@ -791,13 +881,15 @@ Additional docs beyond the minimum bar: [WIKI.md](WIKI.md) (deep architecture di
 | 6 | Resiliency (≥1 pattern) | ✅ Done — 3 patterns | `AccountServiceClient`, `RestClientConfig`, `application.yml` resilience4j config | `ResiliencyTest` |
 | 7 | Graceful degradation | ✅ Done | `EventService`, gateway `AccountController`, `GlobalExceptionHandler` | `ResiliencyTest` |
 | 8 | Docker Compose | ✅ Done | `docker-compose.full.yml`, `docker-compose.yml`, `Dockerfile` | `FullStackIntegrationTest` (exercises the Dockerfile) |
-| 9 | Automated tests | ✅ Done | — | 143 tests, 0 failures, both repos |
+| 9 | Automated tests | ✅ Done | — | 150 tests, 0 failures, both repos |
 | 10 | README | ✅ Done | `README.md` | — |
 | 11 | Constraints (language, commit history) | ✅ Done | `build.gradle`, git history | — |
 
-**Nothing in the stated spec is outstanding.** The only forward-looking item in the codebase is an
-explicitly-optional, not-required enhancement — an automatic background re-drive ("outbox
-sweeper") for events left in `FAILED` after an outage, today recoverable only via client resubmit.
-It's fully designed (two variants, with diagrams) in [WIKI.md §6](WIKI.md#6-future-enhancement-async-fallback-via-outbox--kafka)
-but intentionally **not built**, since the spec's resiliency requirement is satisfied without it —
-flagged here for completeness, not as a gap against the requirements above.
+**Nothing in the stated spec is outstanding.** Beyond the spec, an automatic background redrive for
+events left in `FAILED` after an outage — previously recoverable only via client resubmit — has
+since been built: `OutboxSweeper`, a configurable `@Scheduled` job that reuses
+`EventService`/`EventWriter`/`AccountServiceClient` unchanged. See
+[§7A](#7a-beyond-spec-outbox-sweeper-automatic-recovery) above for the worked example with real
+data, and [WIKI.md §6](WIKI.md#6-async-recovery-outbox-sweeper-built-and-a-possible-kafka-future-not-built)
+for the full design rationale — it was never required by the spec, so its absence was never a gap,
+but it's flagged here since it's no longer accurate to call it "not built."

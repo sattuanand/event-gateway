@@ -466,51 +466,79 @@ This whole sequence — CLOSED → OPEN → fail-fast → HALF_OPEN → CLOSED �
 `ResiliencyTest.circuitOpensAndThenFailsFast()` and the surrounding tests, which assert on the
 breaker's actual state via `CircuitBreakerRegistry`, not just on HTTP status codes.
 
-### What's *not* handled (see also: gaps audit)
+### What's handled automatically today
 
 The write path is durable across a downstream outage — `PENDING`/`FAILED` events sit in
-`eventledger` — but recovery today is **client-initiated only** (a resubmit with the same
-`eventId`). There is no automatic background sweeper polling `FAILED` rows and re-driving them;
-`idx_events_status` and the `EventStatus` enum's own doc comment exist specifically so that
-"bonus" could be added later as one new scheduled class, without a schema change.
+`eventledger` — and recovery is **not** client-initiated only: `OutboxSweeper` (see §6 "Variant A",
+now implemented) redrives `FAILED` events on a schedule, on top of the client-resubmit path that
+always existed. `idx_events_status` and the `EventStatus` enum's own doc comment exist specifically
+because this was the planned extension point — it landed as "a new class plus a scheduled method,"
+with no schema change beyond one new column (`redrive_count`, for the poison-pill cap).
 
 ---
 
-## 6. Future enhancement: async fallback via outbox + Kafka
+## 6. Async recovery: outbox sweeper (built) and a possible Kafka future (not built)
 
-Two variants close the "no automatic re-drive" gap above, at increasing levels of decoupling.
-The `events` table already functions as the outbox — `status IN (PENDING, FAILED)` is exactly
-"needs (re)delivery," `APPLIED` is "delivered, done" — so neither variant needs a new table.
+Two variants close the "no automatic re-drive" gap, at increasing levels of decoupling. The
+`events` table already functions as the outbox — `status IN (PENDING, FAILED)` is exactly "needs
+(re)delivery," `APPLIED` is "delivered, done" — so neither variant needs a new table.
 
-### Variant A — scheduler only, no new infrastructure
+### Variant A — scheduler only, no new infrastructure (✅ implemented — `OutboxSweeper`)
 
-A `@Scheduled` poller reads `PENDING`/`FAILED` rows and re-drives each through the **same**
-`AccountServiceClient` HTTP call that already exists today, reusing its retry/circuit-breaker
-stack unchanged.
+A `@Scheduled` poller (`OutboxSweeper`, `event-gateway/service/OutboxSweeper.java`) redrives
+`FAILED` events — and any `PENDING` row orphaned by a mid-call crash — through the **same**
+`AccountServiceClient` HTTP call and the **same** CAS guard the client-resubmit path
+(`EventService.redriveIfEligible`, extracted from what used to be inline logic in
+`handleExisting`) already used, so no new concurrency or resiliency handling was needed.
 
 ```mermaid
 sequenceDiagram
-    participant Sched as OutboxSweeper (scheduled)
+    participant Sched as OutboxSweeper (@Scheduled)
     participant GWDB as eventledger DB
+    participant ES as EventService
     participant AS as account-service
 
-    loop every N seconds
-        Sched->>GWDB: SELECT * WHERE status IN (PENDING, FAILED)
-        GWDB-->>Sched: rows needing redrive
-        loop for each row
-            Sched->>GWDB: compareAndSetStatus(current → PENDING)
-            Note over Sched: same CAS guard used today —<br/>only one worker wins a given row
-            Sched->>AS: POST /accounts/{id}/transactions
-            AS-->>Sched: 200/201 or failure
-            Sched->>GWDB: UPDATE status = APPLIED (or leave FAILED to retry next sweep)
+    loop every interval-ms (default 5 min, configurable)
+        Sched->>GWDB: bulk UPDATE: PENDING rows older than stale-after → FAILED
+        Note over Sched,GWDB: "reap" phase — atomic, safe under concurrent sweepers:<br/>once a row's status flips, a second reap no longer matches it
+        Sched->>GWDB: SELECT FAILED WHERE redrive_count < max-redrive-attempts<br/>ORDER BY updated_at ASC LIMIT batch-size
+        GWDB-->>Sched: candidates
+        loop for each candidate (isolated try/catch — one poison pill can't stop the batch)
+            Sched->>ES: redriveIfEligible(record)
+            ES->>GWDB: compareAndSetStatusForRedrive(FAILED → PENDING, redrive_count++)
+            Note over ES,GWDB: same CAS guard used by a client resubmit —<br/>only one caller (sweeper OR a racing client) wins a given row
+            ES->>AS: POST /accounts/{id}/transactions (same Retry+CircuitBreaker stack)
+            AS-->>ES: 200/201 or failure
+            ES->>GWDB: UPDATE status = APPLIED (or FAILED, to retry next sweep)
         end
     end
 ```
 
-No new dependency, no new failure mode beyond what already exists — it's "a new class plus a
-scheduled method," exactly as the code's own comment describes.
+Two safety mechanisms beyond the basic redrive that weren't in the original "one new class"
+sketch, added once the concrete failure modes of an actual poller were thought through:
 
-### Variant B — outbox + Kafka pub/sub + scheduler
+- **Stale-`PENDING` reap is a separate bulk step, not folded into the same CAS as `FAILED`
+  rows.** A fresh `PENDING` row might be mid-flight from a live request right now; only rows
+  untouched longer than `stale-after` (default 2 minutes — comfortably past the worst-case ~7s
+  retry-exhaustion window) are assumed orphaned and reaped to `FAILED` first, becoming eligible
+  for the normal redrive CAS on this or the next sweep.
+- **`redrive_count` caps automatic retries per event** (`max-redrive-attempts`, default 10) so a
+  genuinely poison-pill event doesn't get silently retried forever. It's incremented on *every*
+  redrive attempt regardless of trigger (client resubmit or sweeper) — a client can still always
+  manually resubmit past the cap, but the sweeper stops auto-selecting the row once it's exceeded,
+  leaving it for manual investigation instead of looping on it every 5 minutes indefinitely.
+
+Fully configurable per environment with no code change — see README's Configuration table for the
+`OUTBOX_SWEEPER_*` environment variables (`enabled`, `interval-ms`, `stale-after`, `batch-size`,
+`max-redrive-attempts`). Setting `enabled=false` skips creating the bean entirely
+(`@ConditionalOnProperty`), so the schedule never registers — not just a no-op inside the method.
+
+Tested in `OutboxSweeperTest` (business logic — redrive, reap, poison-pill cap, batch isolation, by
+calling `sweep()` directly for determinism) and `OutboxSweeperSchedulingTest` (proves
+`interval-ms` genuinely drives the real `@Scheduled` trigger, by overriding it to 200ms and
+asserting a seeded `FAILED` event is redriven with **no** manual `sweep()` call).
+
+### Variant B — outbox + Kafka pub/sub + scheduler (still a future enhancement, not built)
 
 The fuller Transactional Outbox pattern: instead of re-driving an HTTP call, a publisher
 (scheduled poll, or CDC via Debezium reading the DB's WAL) pushes each `PENDING` row onto a

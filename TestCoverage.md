@@ -5,7 +5,8 @@ proves, and how it maps back to the stated requirements. Same conventions as `WI
 diagrams, grounded in the real test files rather than a generic description.
 
 All counts below are from a fresh, full run of both suites (`./gradlew test`, rerun from clean):
-**60 tests in event-gateway, 83 in account-service, 143 total, 0 failures, 0 skipped.**
+**67 tests in event-gateway, 83 in account-service, 150 total, 0 failures, 0 skipped.** (event-gateway
+was 60 before the outbox sweeper's 7 tests were added — see §5.)
 
 ## Table of contents
 
@@ -155,6 +156,8 @@ inherit the WireMock-wired context instead of standing up its own real one.
 | `TracePropagationTest` | 3 | A W3C `traceparent` header is generated and forwarded on the outbound call to account-service; the same trace id shows up in event-gateway's own response header/logs. |
 | `HealthAndMetricsTest` | 2 | `/health` (or `/actuator/health`) reports its dependencies; custom business metrics (applied/duplicate/rejected counters) are exposed on the metrics endpoint. |
 | `FullStackIntegrationTest` | 1 | The full real-to-real flow: `POST /events` against the real built account-service image, then `GET /accounts/{id}` (through the Gateway's own proxy, not hitting account-service directly) confirms the balance actually landed — see §4. |
+| `OutboxSweeperTest` | 6 | Beyond-spec: the `@Scheduled` outbox sweeper's business logic, calling `sweep()` directly (not the real timer) for determinism. A `FAILED` event is redriven to `APPLIED`; a still-failing downstream leaves it `FAILED` with `redriveCount` incremented; an orphaned stale `PENDING` row is reaped to `FAILED` and redriven in the same sweep; a fresh (non-stale) `PENDING` row is left untouched (might be a live request in flight); a chronically-failing event stops being picked up once `redriveCount` exceeds `max-redrive-attempts`; one poison-pill event doesn't stop the rest of a batch from being redriven. Runs in its own `@DirtiesContext`-guarded Spring context — see class Javadoc for why that annotation is load-bearing, not decorative. |
+| `OutboxSweeperSchedulingTest` | 1 | Beyond-spec: proves `interval-ms` genuinely drives the real Spring `@Scheduled` trigger (not just a config value nobody reads) — overrides it to 200ms, never calls `sweep()` directly, and asserts a seeded `FAILED` event is redriven on its own within a 5s bound. Also `@DirtiesContext`-guarded. |
 
 ## 6. account-service — per-class coverage
 
@@ -189,4 +192,11 @@ inherit the WireMock-wired context instead of standing up its own real one.
   of the locking/dedup logic, not to characterize behavior under production-scale load.
   Explicitly out of scope per this being "a take-home, not a system under production load" (the
   same rationale the code itself gives for sampling 100% of traces).
+- **`OutboxSweeper` has no test for two concurrent sweeper instances racing on the same row.**
+  The CAS it shares with the client-resubmit path (`compareAndSetStatusForRedrive`) is the same
+  primitive already proven safe under concurrency elsewhere in the suite (e.g.
+  `EventIdempotencyTest`'s 8-thread race), so this isn't an untested *mechanism* — but there's no
+  test that literally runs two `OutboxSweeper` instances (i.e. two Gateway replicas) against the
+  same row simultaneously. Only relevant if the Gateway is ever scaled to more than one instance;
+  see the multi-instance note in the sweeper's design discussion.
   

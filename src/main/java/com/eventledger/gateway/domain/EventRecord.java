@@ -62,6 +62,16 @@ public class EventRecord implements Persistable<String> {
     @Column(name = "updated_at", nullable = false)
     private Instant updatedAt;
 
+    /**
+     * How many times a FAILED event has been re-attempted, whether by a client resubmit or the
+     * scheduled {@code OutboxSweeper}. Mutated only via the atomic
+     * {@code EventRepository.compareAndSetStatusForRedrive} UPDATE, never by loading, mutating and
+     * saving the entity — same insert-only discipline the rest of this class follows. No public
+     * setter on purpose.
+     */
+    @Column(name = "redrive_count", nullable = false)
+    private int redriveCount;
+
     @Transient
     private boolean isNew = true;
 
@@ -82,6 +92,7 @@ public class EventRecord implements Persistable<String> {
         this.status = status;
         this.receivedAt = receivedAt;
         this.updatedAt = receivedAt;
+        this.redriveCount = 0;
     }
 
     @Override
@@ -142,5 +153,9 @@ public class EventRecord implements Persistable<String> {
 
     public Instant getUpdatedAt() {
         return updatedAt;
+    }
+
+    public int getRedriveCount() {
+        return redriveCount;
     }
 }

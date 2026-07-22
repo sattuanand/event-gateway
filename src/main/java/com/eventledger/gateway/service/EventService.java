@@ -21,9 +21,10 @@ import java.util.List;
  * <p>The sequence is: durably store as PENDING, then call the Account Service, then record the
  * result. Storing first means the acknowledgement we send upstream is never a lie: by the time the
  * client sees any response at all, the event is on disk. If the downstream call then fails we return
- * 503 and the row sits in FAILED — recoverable either by an upstream resubmit or, later, by an
- * outbox sweeper. The alternative (call first, store on success) has a window where we have applied
- * a real balance change and then crash without any local record of it.
+ * 503 and the row sits in FAILED — recoverable either by an upstream resubmit (see
+ * {@link #handleExisting}) or automatically by the scheduled {@code OutboxSweeper} (see
+ * {@link #redriveIfEligible}). The alternative (call first, store on success) has a window where we
+ * have applied a real balance change and then crash without any local record of it.
  */
 @Service
 public class EventService {
@@ -75,18 +76,38 @@ public class EventService {
                         "Insert of eventId=" + eventId + " conflicted but the row is not readable"));
 
         if (existing.getStatus() == EventStatus.FAILED) {
-            // Only the caller that wins this compare-and-set re-drives the downstream call; any
-            // concurrent duplicate just reads back the current state instead of double-applying.
-            if (writer.compareAndSetStatus(eventId, EventStatus.FAILED, EventStatus.PENDING) == 1) {
-                existing.setStatus(EventStatus.PENDING);
-                log.info("Re-driving previously FAILED eventId={}", eventId);
-                applyDownstream(existing);
+            log.info("Re-driving previously FAILED eventId={}", eventId);
+            if (redriveIfEligible(existing)) {
                 return new SubmitOutcome(existing, true);
             }
+            // Lost the race — a concurrent resubmit or the scheduled OutboxSweeper is already
+            // handling it. Fall through and report the current (still FAILED) state as a duplicate.
         }
 
         metrics.duplicate(existing.getStatus().name());
         return new SubmitOutcome(existing, true);
+    }
+
+    /**
+     * Attempts to redrive a single FAILED event: win the compare-and-set, call downstream, let the
+     * outcome land via {@link #applyDownstream}. Shared by {@link #handleExisting} (client-triggered,
+     * via a resubmit) and {@code OutboxSweeper} (timer-triggered) — both go through the identical
+     * CAS guard and the identical Retry/CircuitBreaker-wrapped call, so neither path needs its own
+     * concurrency or resiliency handling.
+     *
+     * @return true if this call won the race AND the downstream call succeeded; false if it lost the
+     *         race (someone else is already handling this event). If it wins the race but the
+     *         downstream call fails, the {@link AccountServiceException} from {@link #applyDownstream}
+     *         propagates — callers that need to isolate that failure (like the sweeper, processing a
+     *         batch) catch it themselves rather than have it swallowed here.
+     */
+    public boolean redriveIfEligible(EventRecord record) {
+        if (writer.compareAndSetStatusForRedrive(record.getEventId(), record.getStatus(), EventStatus.PENDING) != 1) {
+            return false;
+        }
+        record.setStatus(EventStatus.PENDING);
+        applyDownstream(record);
+        return true;
     }
 
     private void applyDownstream(EventRecord record) {

@@ -44,7 +44,8 @@ event-gateway/src/main/java/com/eventledger/gateway/
                   AccountServiceException hierarchy (Unavailable/Rejected), AccountNotFoundException
   config/         RestClientConfig (timeouts, trace propagation), TraceIdResponseFilter
   domain/         EventRecord (JPA entity, PK = eventId), EventStatus, EventType
-  service/        EventService (orchestration), EventWriter (persistence + CAS), EventMapper, EventMetrics
+  service/        EventService (orchestration + redriveIfEligible), EventWriter (persistence + CAS),
+                  EventMapper, EventMetrics, OutboxSweeper (@Scheduled redrive), OutboxSweeperProperties
 
 account-service/src/main/java/com/eventledger/account/
   api/            AccountController (springdoc-annotated — this IS the OpenAPI contract), GlobalExceptionHandler
@@ -100,6 +101,15 @@ re-read the relevant test class before assuming it still holds.
   uses the OTel Micrometer bridge, event-gateway uses Brave — both default away from W3C without
   this. Its absence is exactly what broke inbound `traceparent` continuation on account-service
   once (see `WIKI.md` §1's fix note) — if trace continuation tests start failing, check this first.
+- **`OutboxSweeper` and a client resubmit share one redrive code path, `EventService.redriveIfEligible`.**
+  Don't add a second, parallel way to flip `FAILED → PENDING` and call downstream — both the
+  scheduler and `EventService.handleExisting()` must go through this one method, or you'll end up
+  with two CAS guards that don't know about each other.
+- **The stale-`PENDING` reap (`EventRepository.reapStale`) and the `FAILED` redrive CAS
+  (`compareAndSetStatusForRedrive`) are deliberately two separate queries, not one.** A fresh
+  `PENDING` row might be a request in flight right now; only age-filtering it (`updated_at <
+  stale-after`) before reaping makes it safe to treat as orphaned. Don't collapse these into a
+  single `status IN (PENDING, FAILED)` query — see `OutboxSweeperTest.doesNotTouchFreshPending`.
 
 ## 4. Config values worth knowing cold
 
@@ -112,6 +122,9 @@ re-read the relevant test class before assuming it still holds.
 | `eventId` max length | 128 chars (`@Size(max = 128)` both sides) | `EventRequest`/`TransactionRequest` |
 | Currency format | exactly 3 letters, case-insensitive (`^[A-Za-z]{3}$`) | same |
 | Amount | must be `> 0` (`@DecimalMin(inclusive = false)`) | same |
+| Outbox sweeper interval | 5 min default, `OUTBOX_SWEEPER_INTERVAL_MS` | `application.yml`, read by `@Scheduled(fixedDelayString=...)` |
+| Outbox sweeper stale-PENDING threshold | 2 min default, `OUTBOX_SWEEPER_STALE_AFTER` | same |
+| Outbox sweeper batch size / max redrive attempts | 50 / 10, `OUTBOX_SWEEPER_BATCH_SIZE` / `OUTBOX_SWEEPER_MAX_ATTEMPTS` | same |
 
 ## 5. How to write a new test — decision tree
 
@@ -219,8 +232,9 @@ style) — cover **both** call sites, not just one:
 Already identified and documented, with reasoning, in `WIKI.md` §5 (end) and §6, and
 `TestCoverage.md` §7:
 
-- No automatic re-drive of `FAILED` events — recovery is client-resubmit only today. `WIKI.md` §6
-  designs both a scheduler-only and a Kafka-outbox enhancement for this.
+- ~~No automatic re-drive of `FAILED` events~~ — closed by `OutboxSweeper` (`WIKI.md` §6, Variant A).
+  A Kafka-outbox enhancement (Variant B) is still designed but not built, for genuine
+  decoupling/scale needs beyond what this system currently requires.
 - No Pact/consumer-driven contract tests between the two services.
 - No rate limiting on the Gateway's public API.
 - Insufficient-funds / currency-mismatch rejection in account-service is a **documented

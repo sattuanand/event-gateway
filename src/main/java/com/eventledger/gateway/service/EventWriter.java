@@ -3,6 +3,7 @@ package com.eventledger.gateway.service;
 import com.eventledger.gateway.domain.EventRecord;
 import com.eventledger.gateway.domain.EventRepository;
 import com.eventledger.gateway.domain.EventStatus;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -55,5 +56,21 @@ public class EventWriter {
     @Transactional(readOnly = true)
     public List<EventRecord> findByAccount(String accountId) {
         return repository.findByAccountIdOrderByEventTimestampAscEventIdAsc(accountId);
+    }
+
+    /** @return how many orphaned PENDING rows were reaped to FAILED. */
+    @Transactional
+    public int reapStalePending(Instant staleThreshold) {
+        return repository.reapStale(EventStatus.PENDING, EventStatus.FAILED, staleThreshold, Instant.now());
+    }
+
+    @Transactional(readOnly = true)
+    public List<EventRecord> findRedrivable(int maxAttempts, int batchSize) {
+        return repository.findRedrivable(EventStatus.FAILED, maxAttempts, PageRequest.of(0, batchSize));
+    }
+
+    @Transactional
+    public int compareAndSetStatusForRedrive(String eventId, EventStatus from, EventStatus to) {
+        return repository.compareAndSetStatusForRedrive(eventId, from, to, Instant.now());
     }
 }
